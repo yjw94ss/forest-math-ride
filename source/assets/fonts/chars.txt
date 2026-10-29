@@ -1,0 +1,699 @@
+extends Node3D
+
+const Quiz = preload("res://quiz.gd")
+var quiz = Quiz.new()
+var phase := "start"
+var travel := 0.0
+var lane := 0
+var scenery: Array[Node3D] = []
+var wheels: Array[Node3D] = []
+var rider: Node3D
+var hud: Label
+var panel: PanelContainer
+var panel_box: VBoxContainer
+var tip: Label
+var status: Label
+var progress: ProgressBar
+var legs: Array[Dictionary] = []
+var crank := 0.0
+var characters: Array[Node3D] = []
+var selected_character := 0
+const CHARACTER_PATHS := ["res://assets/bumblenums/BumbleNum_Teal.glb", "res://assets/bumblenums/BumbleNum_Orange.glb", "res://assets/bumblenums/BumbleNum_Purple.glb"]
+const CHARACTER_NAMES := ["青色", "橙色", "紫色"]
+const CHARACTER_COLORS := [Color("33b6aa"), Color("fa8c1f"), Color("9d6db5")]
+var selection_label: Label
+
+var camera: Camera3D
+var camera_yaw := 0.52
+var camera_pitch := 0.35
+var camera_distance := 8.7
+var dragging_camera := false
+var stars := 0
+var hits := 0
+var jump_height := 0.0
+var jump_velocity := 0.0
+var ride_items: Array[Dictionary] = []
+var message: Label
+var message_time := 0.0
+
+func _ready() -> void:
+	build_world()
+	build_ui()
+	show_start()
+
+func mat(color: Color, roughness := 0.85) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = color
+	m.roughness = roughness
+	return m
+
+func mesh_box(parent: Node3D, pos: Vector3, size: Vector3, color: Color) -> MeshInstance3D:
+	var item := MeshInstance3D.new()
+	var shape := BoxMesh.new()
+	shape.size = size
+	item.mesh = shape
+	item.material_override = mat(color)
+	item.position = pos
+	parent.add_child(item)
+	return item
+
+func ball(parent: Node3D, pos: Vector3, size: Vector3, color: Color) -> MeshInstance3D:
+	var item := MeshInstance3D.new()
+	var shape := SphereMesh.new()
+	shape.radius = 0.5
+	shape.height = 1.0
+	item.mesh = shape
+	item.scale = size
+	item.position = pos
+	item.material_override = mat(color)
+	parent.add_child(item)
+	return item
+
+func bar(parent: Node3D, a: Vector3, b: Vector3, radius: float, color: Color) -> MeshInstance3D:
+	var item := MeshInstance3D.new()
+	var shape := CylinderMesh.new()
+	shape.top_radius = radius
+	shape.bottom_radius = radius
+	shape.height = a.distance_to(b)
+	item.mesh = shape
+	item.material_override = mat(color)
+	item.position = (a + b) / 2.0
+	parent.add_child(item)
+	item.quaternion = Quaternion(Vector3.UP, (b - a).normalized())
+	return item
+
+func position_segment(item: MeshInstance3D, a: Vector3, b: Vector3) -> void:
+	var delta := b - a
+	item.position = (a + b) * 0.5
+	item.scale.y = maxf(delta.length(), 0.0001)
+	if delta.length_squared() > 0.000001:
+		item.quaternion = Quaternion(Vector3.UP, delta.normalized())
+
+func update_pedaling(angle: float) -> void:
+	var center := Vector3(0, 0.58, 0.05)
+	var radius := 0.18
+	var thigh := 0.55
+	var shin := 0.55
+	for i in range(legs.size()):
+		var leg: Dictionary = legs[i]
+		var a := angle + PI * i
+		var target := Vector3(leg.x, center.y + radius * sin(a), center.z + radius * cos(a))
+		var hip := Vector3(leg.x, 1.33, 0.32)
+		var direction := target - hip
+		var distance := clampf(direction.length(), 0.0001, thigh + shin - 0.0001)
+		var unit := direction.normalized()
+		var along := (thigh * thigh - shin * shin + distance * distance) / (2.0 * distance)
+		var bend := sqrt(maxf(0.0, thigh * thigh - along * along))
+		var normal := Vector3(0.0, -unit.z, unit.y).normalized()
+		var knee := hip + unit * along - normal * bend
+		leg.knee = knee
+		position_segment(leg.upper, hip, knee)
+		position_segment(leg.lower, knee, target)
+		position_segment(leg.arm, Vector3(leg.x, center.y, center.z), target)
+		leg.pedal.position = target
+		leg.foot.position = target
+
+func build_world() -> void:
+	var env := WorldEnvironment.new()
+	var e := Environment.new()
+	e.background_mode = Environment.BG_COLOR
+	e.background_color = Color("b7dce0")
+	e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	e.ambient_light_color = Color("fff1d7")
+	e.ambient_light_energy = 0.42
+	env.environment = e
+	add_child(env)
+	var sun := DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-48, -35, 0)
+	sun.light_energy = 0.65
+	sun.shadow_enabled = true
+	add_child(sun)
+	camera = Camera3D.new()
+	add_child(camera)
+	camera.fov = 48
+	camera.current = true
+	mesh_box(self, Vector3(0, -0.15, -10), Vector3(120, 0.2, 160), Color("79a878"))
+	mesh_box(self, Vector3(0, -0.02, -8), Vector3(5.4, 0.12, 100), Color("b97d59"))
+	for side in [-1, 1]:
+		mesh_box(self, Vector3(side * 2.62, 0.055, -10), Vector3(0.12, 0.025, 100), Color("f4d1a3"))
+	# Distant hills are stationary, creating a softer horizon behind the moving road.
+	for i in range(7):
+		ball(self, Vector3(-24 + i * 8, -1.0, -46 - (i % 2) * 5), Vector3(17, 7 + (i % 3), 9), Color("7ca69a"))
+	for i in range(8):
+		var cloud := Node3D.new()
+		cloud.position = Vector3(-16 + i * 5.5, 7.8 + (i % 2), -22 - i * 3)
+		add_child(cloud)
+		for j in range(3):
+			ball(cloud, Vector3((j - 1) * 0.8, (1 - absi(j - 1)) * 0.28, 0), Vector3(1.8, 0.85, 1), Color("fff9eb"))
+	for i in range(26):
+		var stripe := mesh_box(self, Vector3(0, 0.06, -i * 3.5 + 8), Vector3(0.11, 0.02, 1.2), Color("f9e5bb"))
+		scenery.append(stripe)
+		for side in [-1, 1]:
+			var tree := Node3D.new()
+			tree.position = Vector3(side * (4.0 + (i % 3) * 0.9), 0, -i * 3.5 + 8)
+			add_child(tree)
+			bar(tree, Vector3(0, 0, 0), Vector3(0, 1.4, 0), 0.17, Color("956748"))
+			ball(tree, Vector3(0, 1.65, 0), Vector3(1.65, 1.5, 1.5), Color("498f6a") if i % 2 == 0 else Color("70a95f"))
+			ball(tree, Vector3(-0.35, 1.35, -0.1), Vector3(0.95, 0.85, 0.9), Color("64a872"))
+			ball(tree, Vector3(0.35, 1.4, 0.05), Vector3(0.95, 0.85, 0.9), Color("79b87b"))
+			for j in range(3):
+				var flower := Vector3((j - 1) * 0.5, 0.1, (j % 2) * 0.42)
+				ball(tree, flower, Vector3(0.15, 0.1, 0.15), Color("fff2c1") if j != 1 else Color("ecaa95"))
+			if i % 4 == 1:
+				var mushroom := Vector3(side * 0.9, 0.0, 0.6)
+				bar(tree, mushroom, mushroom + Vector3(0, 0.25, 0), 0.08, Color("f4e5c8"))
+				ball(tree, mushroom + Vector3(0, 0.28, 0), Vector3(0.38, 0.22, 0.38), Color("d8755d"))
+				ball(tree, mushroom + Vector3(0, 0.36, 0), Vector3(0.09, 0.03, 0.09), Color("fff4dd"))
+			if i % 6 == 2:
+				for j in range(2):
+					var bx: float = float(side) * (1.0 + j * 0.35)
+					ball(tree, Vector3(bx, 0.23, 0.7), Vector3(0.8, 0.5, 0.65), Color("649b68"))
+			if i % 5 == 0:
+				# Low roadside fencing and a tiny sign break up the tree rhythm.
+				for zoff in [-0.6, 0.6]:
+					bar(tree, Vector3(-side * 0.95, 0, zoff), Vector3(-side * 0.95, 0.63, zoff), 0.06, Color("a87b55"))
+				bar(tree, Vector3(-side * 0.95, 0.44, -0.6), Vector3(-side * 0.95, 0.44, 0.6), 0.045, Color("d2ad7f"))
+			scenery.append(tree)
+	# Two small cottages give the route landmarks without obstructing the lanes.
+	for i in range(3):
+		var cottage := Node3D.new()
+		cottage.position = Vector3(-7.2 if i % 2 == 0 else 7.2, 0, -12.0 - 23.0 * i)
+		add_child(cottage)
+		mesh_box(cottage, Vector3(0, 0.85, 0), Vector3(1.9, 1.7, 1.6), Color("efd9ad"))
+		for side in [-1, 1]:
+			var roof := mesh_box(cottage, Vector3(side * 0.48, 1.87, 0), Vector3(1.25, 0.16, 2.0), Color("b96b50"))
+			roof.rotation.z = side * deg_to_rad(-35)
+		mesh_box(cottage, Vector3(0, 0.53, 0.82), Vector3(0.42, 1.06, 0.05), Color("83583d"))
+		for x in [-0.61, 0.61]:
+			mesh_box(cottage, Vector3(x, 1.0, 0.83), Vector3(0.35, 0.38, 0.06), Color("75acaa"))
+		scenery.append(cottage)
+	rider = Node3D.new()
+	add_child(rider)
+	build_bear_bike(rider)
+	update_camera()
+
+func build_bear_bike(root: Node3D) -> void:
+	var orange := Color("e57247")
+	var brown := CHARACTER_COLORS[0]
+	for z in [-0.85, 0.85]:
+		var pivot := Node3D.new()
+		pivot.position = Vector3(0, 0.43, z)
+		root.add_child(pivot)
+		var wheel := MeshInstance3D.new()
+		var torus := TorusMesh.new()
+		torus.inner_radius = 0.28
+		torus.outer_radius = 0.43
+		wheel.mesh = torus
+		wheel.material_override = mat(Color("354d50"))
+		wheel.rotation.z = PI / 2
+		pivot.add_child(wheel)
+		bar(pivot, Vector3(-0.07, 0, 0), Vector3(0.07, 0, 0), 0.06, Color("f3db9a"))
+		for n in range(8):
+			var angle := TAU * n / 8.0
+			bar(pivot, Vector3(0, 0, 0), Vector3(0, sin(angle) * 0.31, cos(angle) * 0.31), 0.012, Color("f7e9d0"))
+		wheels.append(pivot)
+	var back := Vector3(0, 0.44, 0.85)
+	var front := Vector3(0, 0.44, -0.85)
+	var pedal := Vector3(0, 0.58, 0.05)
+	var seat := Vector3(0, 1.03, 0.38)
+	var neck := Vector3(0, 1.08, -0.5)
+	for pair in [[back, seat], [seat, pedal], [pedal, back], [pedal, neck], [neck, seat], [neck, front]]:
+		bar(root, pair[0], pair[1], 0.055, orange)
+	bar(root, seat, seat + Vector3(0, 0.1, 0), 0.045, Color("615047"))
+	mesh_box(root, Vector3(0, 1.17, 0.38), Vector3(0.38, 0.07, 0.23), Color("6d4c40"))
+	bar(root, neck, Vector3(0, 1.32, -0.62), 0.04, Color("6d4c40"))
+	bar(root, Vector3(-0.35, 1.32, -0.62), Vector3(0.35, 1.32, -0.62), 0.04, Color("6d4c40"))
+	# Imported characters are static meshes. Hide their original static legs and
+	# drive a separate pair of procedural legs from the existing pedal mechanism.
+	for x in [-0.27, 0.27]:
+		var upper := bar(root, Vector3.ZERO, Vector3.UP, 0.105, brown)
+		var lower := bar(root, Vector3.ZERO, Vector3.UP, 0.085, brown)
+		var arm := bar(root, Vector3.ZERO, Vector3.UP, 0.035, Color("5d5147"))
+		var moving_pedal := Node3D.new()
+		root.add_child(moving_pedal)
+		mesh_box(moving_pedal, Vector3.ZERO, Vector3(0.20, 0.05, 0.22), Color("504f47"))
+		var foot := Node3D.new()
+		root.add_child(foot)
+		var foot_mesh := ball(foot, Vector3(0, 0.07, -0.06), Vector3(0.22, 0.17, 0.28), brown)
+		legs.append({"x": x * 0.85, "upper": upper, "lower": lower, "arm": arm, "pedal": moving_pedal, "foot": foot, "foot_mesh": foot_mesh, "knee": Vector3.ZERO})
+	for path in CHARACTER_PATHS:
+		var scene := load(path) as PackedScene
+		var model := scene.instantiate() as Node3D
+		model.position = Vector3(0, 1.12, 0.25)
+		model.scale = Vector3.ONE * 0.65
+		model.rotation.y = PI
+		root.add_child(model)
+		hide_original_legs(model)
+		characters.append(model)
+	change_character(0)
+	# Basket, pedal arms, bell, and the rear mudguard make the bicycle readable close up.
+	mesh_box(root, Vector3(0, 1.12, -0.93), Vector3(0.62, 0.38, 0.42), Color("b77e52"))
+	for x in [-0.2, 0.0, 0.2]:
+		mesh_box(root, Vector3(x, 1.13, -1.15), Vector3(0.035, 0.36, 0.025), Color("eac18e"))
+	for y in [1.0, 1.16, 1.30]:
+		mesh_box(root, Vector3(0, y, -1.15), Vector3(0.61, 0.028, 0.025), Color("eac18e"))
+	ball(root, Vector3(0.1, 1.35, -0.96), Vector3(0.22, 0.24, 0.22), Color("f5c969"))
+	ball(root, Vector3(0.21, 1.37, -0.62), Vector3(0.12, 0.1, 0.12), Color("f7ce63"))
+	bar(root, Vector3(-0.18, 0.58, 0.05), Vector3(0.18, 0.58, 0.05), 0.09, Color("d9bc85"))
+	# A second pair of fine rails gives the frame a visible chain line.
+	for y in [0.48, 0.63]:
+		bar(root, Vector3(0.10, y, 0.08), Vector3(0.10, y - 0.09, 0.85), 0.014, Color("514c43"))
+	ball(root, Vector3(0.12, 0.58, 0.05), Vector3(0.08, 0.30, 0.30), Color("e8c993"))
+	ball(root, Vector3(0.12, 0.44, 0.85), Vector3(0.07, 0.19, 0.19), Color("e8c993"))
+	update_pedaling(0.0)
+
+func hide_original_legs(node: Node) -> void:
+	if node is MeshInstance3D:
+		if "__Leg_" in node.name or "__Foot_" in node.name:
+			node.visible = false
+		# The supplied GLBs have vertex colors but no material or normal vectors.
+		# Generate smooth normals on a copy, retaining the supplied geometry/colors.
+		if node.mesh != null and node.mesh.get_surface_count() == 1:
+			var arrays: Array = node.mesh.surface_get_arrays(0)
+			if arrays[Mesh.ARRAY_NORMAL] == null or arrays[Mesh.ARRAY_NORMAL].size() == 0:
+				var surface := SurfaceTool.new()
+				surface.create_from(node.mesh, 0)
+				surface.generate_normals()
+				node.mesh = surface.commit()
+		var vertex_material := StandardMaterial3D.new()
+		vertex_material.vertex_color_use_as_albedo = true
+		vertex_material.roughness = 0.82
+		node.material_override = vertex_material
+	for child in node.get_children():
+		hide_original_legs(child)
+
+func change_character(index: int) -> void:
+	if characters.is_empty(): return
+	selected_character = posmod(index, characters.size())
+	for i in range(characters.size()):
+		characters[i].visible = i == selected_character
+	for leg in legs:
+		for part in [leg.upper, leg.lower, leg.foot_mesh]:
+			(part.material_override as StandardMaterial3D).albedo_color = CHARACTER_COLORS[selected_character]
+	if is_instance_valid(selection_label):
+		selection_label.text = "当前角色：%s" % CHARACTER_NAMES[selected_character]
+	if is_instance_valid(hud):
+		hud.text = "数字伙伴的森林骑行 · " + CHARACTER_NAMES[selected_character]
+
+func make_star() -> Node3D:
+	var node := Node3D.new()
+	var mesh := ArrayMesh.new()
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# Five-point star with two faces, rendered as an independent visual object.
+	for side in [-1, 1]:
+		for i in range(10):
+			var a := TAU * i / 10.0
+			var b := TAU * (i + 1) / 10.0
+			var r1 := 0.48 if i % 2 == 0 else 0.22
+			var r2 := 0.48 if (i + 1) % 2 == 0 else 0.22
+			surface.add_vertex(Vector3(0, 0, side * 0.04))
+			surface.add_vertex(Vector3(sin(a) * r1, cos(a) * r1, side * 0.04))
+			surface.add_vertex(Vector3(sin(b) * r2, cos(b) * r2, side * 0.04))
+	surface.generate_normals()
+	mesh = surface.commit()
+	var star := MeshInstance3D.new()
+	star.mesh = mesh
+	var material := mat(Color("ffd75a"))
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.emission_enabled = true
+	material.emission = Color("d88d1b")
+	material.emission_energy_multiplier = 0.35
+	star.material_override = material
+	node.add_child(star)
+	return node
+
+func make_log() -> Node3D:
+	var node := Node3D.new()
+	bar(node, Vector3(-0.55, 0.27, 0), Vector3(0.55, 0.27, 0), 0.27, Color("98613e"))
+	for x in [-0.56, 0.56]:
+		ball(node, Vector3(x, 0.27, 0), Vector3(0.05, 0.4, 0.4), Color("e0b57e"))
+	return node
+
+func reset_ride_items() -> void:
+	for item in ride_items:
+		item.node.queue_free()
+	ride_items.clear()
+	# A different, deterministic pattern at every stop; stars and logs never overlap.
+	var index: int = quiz.current_index
+	for i in range(5):
+		var kind := "log" if i == 2 else "star"
+		var item_lane := ((i * 2 + index) % 3) - 1
+		var obj := make_log() if kind == "log" else make_star()
+		obj.position = Vector3(item_lane * 1.25, 0.0 if kind == "log" else 0.85, -6.5 - i * 5.0)
+		add_child(obj)
+		ride_items.append({"node": obj, "kind": kind, "resolved": false})
+
+func resolve_item(kind: String, avoided: bool) -> void:
+	if kind == "star":
+		stars += 1
+		show_message("收集到一颗小星星！")
+	elif kind == "log" and not avoided:
+		hits += 1
+		stars = maxi(0, stars - 1)
+		show_message("碰到木头啦，跳起来可以避开")
+	elif kind == "log":
+		show_message("跳得真好！")
+	refresh_hud()
+
+func start_jump() -> void:
+	if phase == "ride" and jump_height <= 0.001 and jump_velocity == 0.0:
+		jump_velocity = 5.8
+
+func rotate_camera(yaw: float, pitch: float) -> void:
+	camera_yaw += yaw
+	camera_pitch = clampf(camera_pitch + pitch, 0.14, 1.05)
+	update_camera()
+
+func update_camera() -> void:
+	if camera == null or rider == null: return
+	var focus := Vector3(rider.position.x * 0.35, 1.05 + jump_height * 0.3, 0)
+	var horizontal := cos(camera_pitch) * camera_distance
+	camera.position = focus + Vector3(sin(camera_yaw) * horizontal, sin(camera_pitch) * camera_distance, cos(camera_yaw) * horizontal)
+	camera.look_at(focus, Vector3.UP)
+
+func label(text: String, size: int, color := Color("344b47")) -> Label:
+	var l := Label.new()
+	l.text = text
+	var font := load("res://assets/fonts/NotoSansSC.ttf") as Font
+	l.add_theme_font_override("font", font)
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", color)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	return l
+
+func button(text: String, action: Callable) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = Vector2(120, 56)
+	b.add_theme_font_size_override("font_size", 22)
+	var font := load("res://assets/fonts/NotoSansSC.ttf") as Font
+	b.add_theme_font_override("font", font)
+	b.add_theme_color_override("font_color", Color("fffaf0"))
+	b.add_theme_color_override("font_hover_color", Color("fffaf0"))
+	b.add_theme_color_override("font_pressed_color", Color("fffaf0"))
+	for state in ["normal", "hover", "pressed", "focus"]:
+		var skin := StyleBoxFlat.new()
+		skin.bg_color = Color("cc7351") if state == "normal" else Color("af593e")
+		if state == "focus":
+			skin.bg_color = Color(0, 0, 0, 0)
+			skin.set_border_width_all(3)
+			skin.border_color = Color("f5bd77")
+		skin.set_corner_radius_all(14)
+		skin.set_content_margin_all(12)
+		b.add_theme_stylebox_override(state, skin)
+	b.pressed.connect(action)
+	return b
+
+func build_ui() -> void:
+	var layer := CanvasLayer.new()
+	add_child(layer)
+	var root := Control.new()
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(root)
+	var top_panel := PanelContainer.new()
+	top_panel.position = Vector2(26, 22)
+	top_panel.custom_minimum_size = Vector2(360, 0)
+	top_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var hud_style := StyleBoxFlat.new()
+	hud_style.bg_color = Color(0.99, 0.97, 0.91, 0.93)
+	hud_style.set_corner_radius_all(15)
+	hud_style.set_content_margin_all(15)
+	hud_style.shadow_color = Color(0.19, 0.27, 0.20, 0.13)
+	hud_style.shadow_size = 6
+	top_panel.add_theme_stylebox_override("panel", hud_style)
+	root.add_child(top_panel)
+	var top := VBoxContainer.new()
+	top.add_theme_constant_override("separation", 7)
+	top.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	top_panel.add_child(top)
+	hud = label("数字伙伴的森林骑行 · 青色", 20, Color("365447"))
+	hud.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	top.add_child(hud)
+	status = label("", 16, Color("526c58"))
+	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	top.add_child(status)
+	progress = ProgressBar.new()
+	progress.max_value = 5
+	progress.show_percentage = false
+	progress.custom_minimum_size = Vector2(330, 9)
+	var track := StyleBoxFlat.new()
+	track.bg_color = Color("e4e9d4")
+	track.set_corner_radius_all(6)
+	var fill := StyleBoxFlat.new()
+	fill.bg_color = Color("70a575")
+	fill.set_corner_radius_all(6)
+	progress.add_theme_stylebox_override("background", track)
+	progress.add_theme_stylebox_override("fill", fill)
+	top.add_child(progress)
+	var tips_panel := PanelContainer.new()
+	tips_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	tips_panel.offset_left = 26
+	tips_panel.offset_top = -64
+	tips_panel.offset_right = 586
+	tips_panel.offset_bottom = -18
+	tips_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var tips_style := StyleBoxFlat.new()
+	tips_style.bg_color = Color(0.99, 0.97, 0.91, 0.91)
+	tips_style.set_corner_radius_all(13)
+	tips_style.set_content_margin_all(10)
+	tips_panel.add_theme_stylebox_override("panel", tips_style)
+	root.add_child(tips_panel)
+	tip = label("← → 变道   空格 跳跃   C 换角色   鼠标转视角", 15, Color("42604d"))
+	tips_panel.add_child(tip)
+	message = label("", 23, Color("fffaf0"))
+	message.add_theme_constant_override("outline_size", 5)
+	message.add_theme_color_override("font_outline_color", Color("86503e"))
+	message.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	message.offset_left = -250
+	message.offset_right = 250
+	message.offset_top = 120
+	message.offset_bottom = 155
+	root.add_child(message)
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(center)
+	panel = PanelContainer.new()
+	panel.custom_minimum_size = Vector2(510, 0)
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color("fffaf0")
+	style.set_corner_radius_all(24)
+	style.set_content_margin_all(30)
+	style.set_border_width_all(2)
+	style.border_color = Color("ebd6b8")
+	style.shadow_color = Color(0.20, 0.29, 0.22, 0.22)
+	style.shadow_size = 15
+	panel.add_theme_stylebox_override("panel", style)
+	center.add_child(panel)
+	panel_box = VBoxContainer.new()
+	panel_box.add_theme_constant_override("separation", 14)
+	panel.add_child(panel_box)
+
+func clear_panel() -> void:
+	for child in panel_box.get_children():
+		panel_box.remove_child(child)
+		child.queue_free()
+
+func show_start() -> void:
+	phase = "start"
+	panel.show()
+	clear_panel()
+	panel_box.add_child(label("数字伙伴的森林骑行", 35, Color("355343")))
+	panel_box.add_child(label("一起踏上数字小路", 21, Color("b6714d")))
+	panel_box.add_child(label("收集星星，跳过木头，\n和小伙伴一起通过 5 个数学路口。", 19, Color("617365")))
+	selection_label = label("当前角色：%s" % CHARACTER_NAMES[selected_character], 17, Color("526b59"))
+	panel_box.add_child(selection_label)
+	var choices := HBoxContainer.new()
+	choices.alignment = BoxContainer.ALIGNMENT_CENTER
+	choices.add_theme_constant_override("separation", 10)
+	panel_box.add_child(choices)
+	for i in range(3):
+		choices.add_child(button(CHARACTER_NAMES[i], change_character.bind(i)))
+	panel_box.add_child(label("方向键变道  ·  空格跳跃  ·  鼠标转视角", 15, Color("839181")))
+	panel_box.add_child(button("开始冒险", start_game))
+	refresh_hud()
+
+func start_game() -> void:
+	quiz.reset()
+	travel = 0
+	lane = 0
+	stars = 0
+	hits = 0
+	jump_height = 0.0
+	jump_velocity = 0.0
+	crank = 0.0
+	rider.position = Vector3.ZERO
+	message.text = ""
+	camera_yaw = 0.52
+	camera_pitch = 0.35
+	camera_distance = 8.7
+	phase = "ride"
+	reset_ride_items()
+	update_camera()
+	panel.hide()
+	refresh_hud()
+
+func refresh_hud() -> void:
+	status.text = "已通过 %d / 5 站    星星 %d    撞到木头 %d 次" % [quiz.correct_count, stars, hits]
+	progress.value = quiz.correct_count
+
+func show_question() -> void:
+	phase = "question"
+	dragging_camera = false
+	panel.show()
+	clear_panel()
+	var q: Dictionary = quiz.current_question()
+	panel_box.add_child(label("第 %d 站 / 共 5 站" % (quiz.current_index + 1), 19, Color("b6714d")))
+	panel_box.add_child(label("想一想，答案是多少？", 22, Color("526b59")))
+	panel_box.add_child(label(q.prompt, 54, Color("355343")))
+	var options := HBoxContainer.new()
+	options.alignment = BoxContainer.ALIGNMENT_CENTER
+	options.add_theme_constant_override("separation", 12)
+	panel_box.add_child(options)
+	for value in q.options:
+		options.add_child(button(str(value), choose_answer.bind(value)))
+	var hint := label("选一个答案，陪小伙伴继续前进", 17, Color("839181"))
+	hint.name = "Hint"
+	panel_box.add_child(hint)
+
+func choose_answer(value: int) -> void:
+	if phase != "question": return
+	if quiz.answer(value):
+		refresh_hud()
+		if quiz.finished():
+			show_finish()
+		else:
+			phase = "ride"
+			travel = 0
+			jump_height = 0.0
+			jump_velocity = 0.0
+			reset_ride_items()
+			panel.hide()
+	else:
+		refresh_hud()
+		var hint := panel_box.get_node("Hint") as Label
+		hint.text = "不着急，再想一想！"
+		hint.add_theme_color_override("font_color", Color("c36743"))
+
+func show_finish() -> void:
+	phase = "finish"
+	panel.show()
+	clear_panel()
+	panel_box.add_child(label("到达终点啦！", 38, Color("355343")))
+	panel_box.add_child(label("和小伙伴一起走完了森林小路", 21, Color("b6714d")))
+	panel_box.add_child(label("通过 5 个路口  ·  收集 %d 颗星星" % stars, 21))
+	panel_box.add_child(label("碰到木头 %d 次  ·  答错后重试 %d 次" % [hits, quiz.wrong_attempts], 17, Color("839181")))
+	panel_box.add_child(button("再来一次", start_game))
+
+func _unhandled_key_input(event: InputEvent) -> void:
+	if phase != "ride" or not event is InputEventKey or not event.pressed or event.echo: return
+	if event.keycode == KEY_LEFT or event.keycode == KEY_A:
+		lane = maxi(-1, lane - 1)
+	elif event.keycode == KEY_RIGHT or event.keycode == KEY_D:
+		lane = mini(1, lane + 1)
+	elif event.keycode == KEY_SPACE or event.keycode == KEY_UP or event.keycode == KEY_W:
+		start_jump()
+	elif event.keycode == KEY_C:
+		change_character(selected_character + 1)
+	elif event.keycode == KEY_Q:
+		rotate_camera(-0.35, 0.0)
+	elif event.keycode == KEY_E:
+		rotate_camera(0.35, 0.0)
+	elif event.keycode == KEY_R:
+		camera_yaw = 0.52
+		camera_pitch = 0.35
+		camera_distance = 8.7
+		update_camera()
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_LEFT or event.button_index == MOUSE_BUTTON_RIGHT:
+			dragging_camera = event.pressed
+		elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			camera_distance = maxf(4.6, camera_distance - 0.5)
+			update_camera()
+		elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			camera_distance = minf(13.0, camera_distance + 0.5)
+			update_camera()
+	elif event is InputEventMouseMotion and dragging_camera:
+		rotate_camera(-event.relative.x * 0.008, event.relative.y * 0.006)
+
+func show_message(text: String) -> void:
+	message.text = text
+	message_time = 1.5
+
+func _process(delta: float) -> void:
+	if phase != "ride": return
+	var dt := minf(delta, 0.05)
+	travel += dt * 5.0
+	if message_time > 0:
+		message_time -= dt
+		if message_time <= 0: message.text = ""
+	if jump_height > 0.0 or jump_velocity > 0.0:
+		jump_velocity -= 14.0 * dt
+		jump_height = maxf(0.0, jump_height + jump_velocity * dt)
+		if jump_height <= 0.0: jump_velocity = 0.0
+	rider.position.x = lerpf(rider.position.x, float(lane) * 1.25, 1.0 - exp(-6.0 * dt))
+	rider.position.y = jump_height + sin(travel * 3.0) * 0.025
+	rider.rotation.z = (float(lane) * 1.25 - rider.position.x) * -0.07
+	crank += dt * 5.0
+	update_pedaling(crank)
+	for wheel in wheels:
+		wheel.rotation.x += dt * (5.0 / 0.43)
+	for obj in scenery:
+		obj.position.z += dt * 5.0
+		if obj.position.z > 12.0:
+			obj.position.z -= 91.0
+	for item in ride_items:
+		if item.resolved: continue
+		var obj: Node3D = item.node
+		obj.position.z += dt * 5.0
+		if item.kind == "star":
+			obj.rotation.y += dt * 2.5
+			obj.position.y = 0.9 + sin(travel * 2.0) * 0.12
+		if obj.position.z >= -0.1:
+			item.resolved = true
+			if absf(obj.position.x - rider.position.x) < 0.62:
+				resolve_item(item.kind, jump_height > 0.45)
+			obj.visible = false
+	update_camera()
+	if travel >= 32.0:
+		show_question()
+extends RefCounted
+
+var questions := [
+	{"prompt": "2 + 3 = ?", "options": [4, 5, 6], "answer": 5},
+	{"prompt": "7 - 2 = ?", "options": [5, 4, 6], "answer": 5},
+	{"prompt": "4 + 4 = ?", "options": [7, 9, 8], "answer": 8},
+	{"prompt": "9 - 3 = ?", "options": [5, 6, 7], "answer": 6},
+	{"prompt": "6 + 3 = ?", "options": [9, 8, 7], "answer": 9},
+]
+var current_index := 0
+var wrong_attempts := 0
+var correct_count := 0
+
+func current_question() -> Dictionary:
+	if finished(): return {}
+	return questions[current_index]
+
+func answer(value: int) -> bool:
+	if finished(): return false
+	if value != current_question().answer:
+		wrong_attempts += 1
+		return false
+	correct_count += 1
+	current_index += 1
+	return true
+
+func finished() -> bool:
+	return current_index >= questions.size()
+
+func reset() -> void:
+	current_index = 0
+	wrong_attempts = 0
+	correct_count = 0
+abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ！？，。：；、（）+-*/=<>←→·
